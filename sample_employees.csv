@@ -1,0 +1,21 @@
+Employee ID,Full Name,Department,Job Title,Job Level,Salary,Gender,Race/Ethnicity,Years at Company,Performance Rating
+E001,James Hartley,Engineering,Software Engineer,L3,92000,Male,White,5,3.8
+E002,Priya Nair,Engineering,Software Engineer,L3,85000,Female,Asian,3,4.1
+E003,Marcus Thompson,Engineering,Senior Engineer,L4,118000,Male,Black,7,4.0
+E004,Sofia Alvarez,Engineering,Senior Engineer,L4,109000,Female,Hispanic,6,4.3
+E005,David Chen,Engineering,Staff Engineer,L5,152000,Male,Asian,10,4.5
+E006,Rachel Kim,Engineering,Software Engineer,L3,78000,Female,Asian,2,3.5
+E007,Tyler Brooks,Sales,Account Executive,L3,75000,Male,White,4,3.7
+E008,Amara Osei,Sales,Account Executive,L3,68000,Female,Black,3,3.9
+E009,Lucas Fernandez,Sales,Senior Account Executive,L4,98000,Male,Hispanic,6,4.2
+E010,Hannah Müller,Sales,Senior Account Executive,L4,89000,Female,White,5,4.0
+E011,Kevin Patel,HR,HR Business Partner,L3,72000,Male,Asian,4,3.6
+E012,Jasmine Carter,HR,HR Business Partner,L3,70000,Female,Black,3,3.8
+E013,Oliver Wright,HR,Senior HR Manager,L4,101000,Male,White,8,4.1
+E014,Mei-Lin Zhou,Finance,Financial Analyst,L3,80000,Female,Asian,3,4.0
+E015,Brandon Scott,Finance,Financial Analyst,L3,83000,Male,White,4,3.7
+E016,Aisha Mahmoud,Finance,Senior Financial Analyst,L4,105000,Female,Black,6,4.4
+E017,Ryan O'Brien,Finance,Senior Financial Analyst,L4,112000,Male,White,7,3.9
+E018,Natalie Torres,Marketing,Marketing Manager,L4,95000,Female,Hispanic,5,4.2
+E019,Samuel Lee,Marketing,Marketing Specialist,L3,67000,Male,Asian,2,3.4
+E020,Diana Prince,Engineering,Staff Engineer,L5,138000,Female,White,9,4.6
