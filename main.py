@@ -6,7 +6,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Fair Pay Pilot API")
 
-# Allow any frontend (including Lovable) to call this API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,26 +14,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-REQUIRED_COLUMNS = [
-    "Employee ID",
-    "Full Name",
-    "Department",
-    "Job Title",
-    "Job Level",
-    "Salary",
-    "Gender",
-    "Race/Ethnicity",
-    "Years at Company",
-    "Performance Rating",
-]
+MANDATORY_FIELDS = ["Salary", "Gender", "Job Level", "Department"]
+
+COLUMN_VARIANTS = {
+    "Salary": ["salary", "pay", "compensation", "annual salary", "base salary", "base pay"],
+    "Gender": ["gender", "sex"],
+    "Job Level": ["job level", "level", "grade", "band", "seniority"],
+    "Department": ["department", "dept", "team", "division"],
+    "Race/Ethnicity": ["race/ethnicity", "ethnicity", "race", "diversity"],
+    "Years at Company": ["years at company", "tenure", "years"],
+    "Performance Rating": ["performance rating", "performance", "rating", "review"],
+    "Employee ID": ["employee id", "employee_id", "emp id", "emp_id"],
+    "Job Title": ["job title", "job_title", "title", "position", "role"],
+}
+
+
+def resolve_columns(df_columns: list) -> dict:
+    col_lower_map = {c.lower().strip(): c for c in df_columns}
+    resolved = {}
+    for canonical, variants in COLUMN_VARIANTS.items():
+        for variant in variants:
+            if variant in col_lower_map:
+                resolved[canonical] = col_lower_map[variant]
+                break
+    return resolved
+
+
+def clean_salary(value):
+    if pd.isna(value):
+        return value
+    return str(value).replace("£", "").replace("$", "").replace("€", "").replace(",", "").strip()
 
 
 def gap_table(avg_by_group: pd.Series) -> dict:
-    """
-    Given a Series of {group_name: average_salary}, return a dict with
-    the average salary and the pay gap % vs the highest-paid group.
-    A gap of 0 % means this group IS the highest-paid reference group.
-    """
     highest = float(avg_by_group.max())
     result = {}
     for group, avg in avg_by_group.items():
@@ -47,13 +59,8 @@ def gap_table(avg_by_group: pd.Series) -> dict:
 
 
 def adjusted_gap_table(df: pd.DataFrame, dimension: str) -> dict:
-    """
-    Calculate average salary by Job Level × dimension (e.g. Gender or Race/Ethnicity).
-    Within each job level, compute the pay gap vs the highest-paid sub-group.
-    """
     grouped = df.groupby(["Job Level", dimension])["Salary"].mean()
     levels: dict = {}
-
     for (level, group), avg in grouped.items():
         level_key = str(level)
         if level_key not in levels:
@@ -75,7 +82,6 @@ def adjusted_gap_table(df: pd.DataFrame, dimension: str) -> dict:
 
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
-    # ── 1. Read and validate the uploaded file ────────────────────────────────
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Please upload a CSV file.")
 
@@ -85,59 +91,140 @@ async def analyze(file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not read CSV: {exc}")
 
-    missing_cols = [c for c in REQUIRED_COLUMNS if c not in df.columns]
-    if missing_cols:
+    # Trim whitespace from all string columns and drop completely empty rows
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].str.strip()
+    df = df.dropna(how="all").copy()
+
+    # Resolve CSV columns to canonical names (case-insensitive, variant-aware)
+    col_map = resolve_columns(list(df.columns))
+
+    missing_mandatory = [f for f in MANDATORY_FIELDS if f not in col_map]
+    if missing_mandatory:
         raise HTTPException(
             status_code=400,
-            detail=f"CSV is missing these required columns: {missing_cols}",
+            detail={
+                "message": "CSV is missing required columns.",
+                "missing_fields": missing_mandatory,
+                "hint": {
+                    "Salary": "accepted names: salary, pay, compensation, annual salary, base salary, base pay",
+                    "Gender": "accepted names: gender, sex",
+                    "Job Level": "accepted names: job level, level, grade, band, seniority",
+                    "Department": "accepted names: department, dept, team, division",
+                },
+            },
         )
 
-    # Clean salary — drop rows where salary is not a number
+    # Rename columns to canonical names
+    df = df.rename(columns={v: k for k, v in col_map.items()})
+
+    has_employee_id = "Employee ID" in df.columns
+    has_job_title = "Job Title" in df.columns
+    has_race_ethnicity = "Race/Ethnicity" in df.columns
+    has_years_at_company = "Years at Company" in df.columns
+    has_performance_rating = "Performance Rating" in df.columns
+
+    # Clean and validate salary
+    df["Salary"] = df["Salary"].apply(clean_salary)
     df["Salary"] = pd.to_numeric(df["Salary"], errors="coerce")
     df = df.dropna(subset=["Salary"]).copy()
 
     if df.empty:
         raise HTTPException(status_code=400, detail="No valid salary rows found in the CSV.")
 
-    # ── 2. Unadjusted pay gap ─────────────────────────────────────────────────
-    unadjusted = {
+    # ── available_analyses ────────────────────────────────────────────────────
+    skipped_reasons = {}
+    if not has_race_ethnicity:
+        skipped_reasons["ethnicity_gap"] = "Race/Ethnicity column not found"
+    if not has_years_at_company:
+        skipped_reasons["tenure_analysis"] = "Years at Company column not found"
+    if not has_performance_rating:
+        skipped_reasons["performance_analysis"] = "Performance Rating column not found"
+    if not has_employee_id:
+        skipped_reasons["outlier_tracking"] = "Employee ID column not found"
+
+    available_analyses = {
+        "gender_gap": True,
+        "department_breakdown": True,
+        "ethnicity_gap": has_race_ethnicity,
+        "tenure_analysis": has_years_at_company,
+        "performance_analysis": has_performance_rating,
+        "outlier_tracking": has_employee_id,
+        "skipped_reasons": skipped_reasons,
+    }
+
+    # ── Gender pay gap ────────────────────────────────────────────────────────
+    unadjusted_pay_gap = {
         "by_gender": gap_table(df.groupby("Gender")["Salary"].mean()),
-        "by_race_ethnicity": gap_table(df.groupby("Race/Ethnicity")["Salary"].mean()),
     }
-
-    # ── 3. Adjusted pay gap (controls for Job Level) ──────────────────────────
-    adjusted = {
+    adjusted_pay_gap = {
         "by_gender_within_job_level": adjusted_gap_table(df, "Gender"),
-        "by_race_within_job_level": adjusted_gap_table(df, "Race/Ethnicity"),
     }
 
-    # ── 4. Flagged outliers ───────────────────────────────────────────────────
-    # Peer group = employees in the same Job Level.
-    # Flag anyone paid more than 20 % above or below their peer group average.
+    # ── Race/Ethnicity pay gap (optional) ─────────────────────────────────────
+    if has_race_ethnicity:
+        unadjusted_pay_gap["by_race_ethnicity"] = gap_table(
+            df.groupby("Race/Ethnicity")["Salary"].mean()
+        )
+        adjusted_pay_gap["by_race_within_job_level"] = adjusted_gap_table(df, "Race/Ethnicity")
+
+    # ── Tenure analysis (optional) ────────────────────────────────────────────
+    tenure_analysis = None
+    if has_years_at_company:
+        df["Years at Company"] = pd.to_numeric(df["Years at Company"], errors="coerce")
+        bins = [0, 1, 3, 5, 10, float("inf")]
+        labels = ["<1 year", "1-3 years", "3-5 years", "5-10 years", "10+ years"]
+        df["_tenure_band"] = pd.cut(df["Years at Company"], bins=bins, labels=labels, right=False)
+        agg = df.groupby("_tenure_band", observed=True)["Salary"].agg(
+            average_salary="mean", headcount="count"
+        )
+        tenure_analysis = {
+            str(band): {
+                "average_salary": round(float(row["average_salary"]), 2),
+                "headcount": int(row["headcount"]),
+            }
+            for band, row in agg.iterrows()
+        }
+
+    # ── Performance vs pay analysis (optional) ────────────────────────────────
+    performance_analysis = None
+    if has_performance_rating:
+        agg = df.groupby("Performance Rating")["Salary"].agg(
+            average_salary="mean", headcount="count"
+        )
+        performance_analysis = {
+            str(rating): {
+                "average_salary": round(float(row["average_salary"]), 2),
+                "headcount": int(row["headcount"]),
+            }
+            for rating, row in agg.iterrows()
+        }
+
+    # ── Outlier detection ─────────────────────────────────────────────────────
     df["_peer_avg"] = df.groupby("Job Level")["Salary"].transform("mean")
     df["_ratio"] = df["Salary"] / df["_peer_avg"]
+    flagged_rows = df[(df["_ratio"] > 1.20) | (df["_ratio"] < 0.80)]
 
-    outlier_mask = (df["_ratio"] > 1.20) | (df["_ratio"] < 0.80)
-    flagged_rows = df[outlier_mask]
-
-    flagged_outliers = [
-        {
-            "employee_id": str(row["Employee ID"]),
-            "full_name": str(row["Full Name"]),
+    flagged_outliers = []
+    for _, row in flagged_rows.iterrows():
+        entry: dict = {
             "department": str(row["Department"]),
-            "job_title": str(row["Job Title"]),
             "job_level": str(row["Job Level"]),
             "gender": str(row["Gender"]),
-            "race_ethnicity": str(row["Race/Ethnicity"]),
             "salary": round(float(row["Salary"]), 2),
             "peer_group_average": round(float(row["_peer_avg"]), 2),
             "variance_pct": round((float(row["_ratio"]) - 1) * 100, 2),
             "flag": "ABOVE average" if row["_ratio"] > 1.20 else "BELOW average",
         }
-        for _, row in flagged_rows.iterrows()
-    ]
+        if has_employee_id:
+            entry["employee_id"] = str(row["Employee ID"])
+        if has_job_title:
+            entry["job_title"] = str(row["Job Title"])
+        if has_race_ethnicity:
+            entry["race_ethnicity"] = str(row["Race/Ethnicity"])
+        flagged_outliers.append(entry)
 
-    # ── 5. Department summary ─────────────────────────────────────────────────
+    # ── Department summary ────────────────────────────────────────────────────
     dept_gender = (
         df.groupby(["Department", "Gender"])["Salary"]
         .agg(average_salary="mean", headcount="count")
@@ -164,7 +251,7 @@ async def analyze(file: UploadFile = File(...)):
                 "headcount": int(row["headcount"]),
             }
 
-    # ── 6. High-level summary ─────────────────────────────────────────────────
+    # ── Summary ───────────────────────────────────────────────────────────────
     summary = {
         "total_employees": len(df),
         "total_departments": int(df["Department"].nunique()),
@@ -174,10 +261,18 @@ async def analyze(file: UploadFile = File(...)):
         "flagged_outlier_count": len(flagged_outliers),
     }
 
-    return {
+    response: dict = {
+        "available_analyses": available_analyses,
         "summary": summary,
-        "unadjusted_pay_gap": unadjusted,
-        "adjusted_pay_gap": adjusted,
+        "unadjusted_pay_gap": unadjusted_pay_gap,
+        "adjusted_pay_gap": adjusted_pay_gap,
         "flagged_outliers": flagged_outliers,
         "department_summary": department_summary,
     }
+
+    if tenure_analysis is not None:
+        response["tenure_analysis"] = tenure_analysis
+    if performance_analysis is not None:
+        response["performance_analysis"] = performance_analysis
+
+    return response
