@@ -1,4 +1,5 @@
 import io
+from datetime import date
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
@@ -27,6 +28,12 @@ COLUMN_VARIANTS = {
     "Performance Rating": ["performance rating", "performance", "rating", "review"],
     "Employee ID": ["employee id", "employee_id", "emp id", "emp_id"],
     "Job Title": ["job title", "job_title", "title", "position", "role"],
+    "Bonus": ["bonus", "bonus amount", "annual bonus", "variable pay", "incentive"],
+    "Total Compensation": ["total compensation", "total comp", "total pay", "total reward"],
+    "Hire Date": ["hire date", "start date", "date joined", "join date"],
+    "Pay Band Min": ["pay band min", "band min", "salary band min", "range min"],
+    "Pay Band Max": ["pay band max", "band max", "salary band max", "range max"],
+    "Pay Band Mid": ["pay band mid", "band mid", "midpoint", "salary midpoint"],
 }
 
 
@@ -59,8 +66,8 @@ def gap_table(avg_by_group: pd.Series) -> dict:
     return result
 
 
-def adjusted_gap_table(df: pd.DataFrame, dimension: str) -> dict:
-    grouped = df.groupby(["Job Level", dimension])["Salary"].mean()
+def adjusted_gap_table(df: pd.DataFrame, dimension: str, col: str = "Salary") -> dict:
+    grouped = df.groupby(["Job Level", dimension])[col].mean()
     levels: dict = {}
     for (level, group), avg in grouped.items():
         level_key = str(level)
@@ -80,6 +87,8 @@ def adjusted_gap_table(df: pd.DataFrame, dimension: str) -> dict:
         }
     return result
 
+
+# ── Regression helpers ─────────────────────────────────────────────────────────
 
 def _convert_job_level_numeric(series: pd.Series, salary_series: pd.Series) -> pd.Series:
     """Extract digits from level strings (L1→1). Falls back to salary-rank ordering."""
@@ -148,10 +157,11 @@ def _build_base_features(
 
 
 def _gender_interpretation(
-    gap_pct: "float | None", p_value: float, n: int, controlled: "list[str]"
+    gap_pct: "float | None", p_value: float, n: int, controlled: "list[str]",
+    target_label: str = "salary",
 ) -> str:
     if gap_pct is None:
-        return "Could not calculate the gender pay gap percentage."
+        return f"Could not calculate the gender pay gap in {target_label}."
     controls = ", ".join(v.lower() for v in controlled) if controlled else "available factors"
     direction = "less" if gap_pct < 0 else "more"
     abs_gap = abs(round(gap_pct, 1))
@@ -159,7 +169,7 @@ def _gender_interpretation(
         sig = "This gap is statistically significant."
     else:
         sig = "This is not statistically significant — it could be due to chance given the sample size."
-    text = f"After controlling for {controls}, women are paid {abs_gap}% {direction} than men. {sig}"
+    text = f"After controlling for {controls}, women earn {abs_gap}% {direction} than men in {target_label}. {sig}"
     if n < 50:
         text += " Results should be treated with caution — fewer than 50 employees in the dataset reduces statistical reliability."
     return text
@@ -185,7 +195,9 @@ def _ethnicity_interpretation(
     return text
 
 
-def run_gender_regression(df: pd.DataFrame, has_years: bool, has_perf: bool) -> dict:
+def _run_gender_regression_on(
+    df: pd.DataFrame, target_col: str, has_years: bool, has_perf: bool
+) -> dict:
     if len(df) < 20:
         return {"error": "Sample too small for regression — fewer than 20 employees in the dataset."}
     try:
@@ -197,7 +209,7 @@ def run_gender_regression(df: pd.DataFrame, has_years: bool, has_perf: bool) -> 
 
         X = pd.concat([X_base, gender_enc.rename("gender_female")], axis=1)
         X = sm.add_constant(X)
-        y = df["Salary"]
+        y = df[target_col]
 
         valid = X.notna().all(axis=1) & y.notna()
         X_fit, y_fit = X[valid], y[valid]
@@ -212,10 +224,11 @@ def run_gender_regression(df: pd.DataFrame, has_years: bool, has_perf: bool) -> 
         ci = model.conf_int().loc["gender_female"]
 
         male_mask = df["Gender"].astype(str).str.lower().str.strip().isin({"male", "m", "man", "men"})
-        avg_male_val = df.loc[valid & male_mask, "Salary"].mean()
+        avg_male_val = df.loc[valid & male_mask, target_col].mean()
         gap_pct = float(coef / avg_male_val * 100) if pd.notna(avg_male_val) and avg_male_val > 0 else None
 
         n = len(y_fit)
+        target_label = "salary" if target_col == "Salary" else "total compensation"
         return {
             "unexplained_gender_gap_pct": round(gap_pct, 2) if gap_pct is not None else None,
             "is_significant": bool(pval < 0.05),
@@ -223,21 +236,23 @@ def run_gender_regression(df: pd.DataFrame, has_years: bool, has_perf: bool) -> 
             "confidence_interval": [round(float(ci.iloc[0]), 2), round(float(ci.iloc[1]), 2)],
             "variables_controlled": controlled,
             "sample_size_warning": n < 50,
-            "interpretation": _gender_interpretation(gap_pct, pval, n, controlled),
+            "interpretation": _gender_interpretation(gap_pct, pval, n, controlled, target_label),
         }
     except Exception as exc:
         return {"error": f"Regression failed: {exc}"}
 
 
-def run_ethnicity_regression(df: pd.DataFrame, has_years: bool, has_perf: bool) -> dict:
+def _run_ethnicity_regression_on(
+    df: pd.DataFrame, target_col: str, has_years: bool, has_perf: bool
+) -> dict:
     if len(df) < 20:
         return {"error": "Sample too small for regression — fewer than 20 employees in the dataset."}
     try:
-        unique_groups = [g for g in df["Race/Ethnicity"].dropna().unique()]
+        unique_groups = list(df["Race/Ethnicity"].dropna().unique())
         if len(unique_groups) < 2:
             return {"error": "Fewer than 2 ethnicity groups found — regression not applicable."}
 
-        avg_by_eth = df.groupby("Race/Ethnicity")["Salary"].mean()
+        avg_by_eth = df.groupby("Race/Ethnicity")[target_col].mean()
         reference_group = str(avg_by_eth.idxmax())
         other_groups = [str(g) for g in unique_groups if str(g) != reference_group]
 
@@ -246,13 +261,13 @@ def run_ethnicity_regression(df: pd.DataFrame, has_years: bool, has_perf: bool) 
         eth_features = pd.DataFrame(index=df.index)
         col_to_group: dict = {}
         for group in other_groups:
-            col_name = f"eth_{group}"
-            eth_features[col_name] = (df["Race/Ethnicity"].astype(str) == group).astype(float)
-            col_to_group[col_name] = group
+            cname = f"eth_{group}"
+            eth_features[cname] = (df["Race/Ethnicity"].astype(str) == group).astype(float)
+            col_to_group[cname] = group
 
         X = pd.concat([X_base, eth_features], axis=1)
         X = sm.add_constant(X)
-        y = df["Salary"]
+        y = df[target_col]
 
         valid = X.notna().all(axis=1) & y.notna() & df["Race/Ethnicity"].notna()
         X_fit, y_fit = X[valid], y[valid]
@@ -263,16 +278,16 @@ def run_ethnicity_regression(df: pd.DataFrame, has_years: bool, has_perf: bool) 
         model = sm.OLS(y_fit, X_fit).fit()
 
         ref_mask = df["Race/Ethnicity"].astype(str) == reference_group
-        avg_ref = float(df.loc[valid & ref_mask, "Salary"].mean())
+        avg_ref = float(df.loc[valid & ref_mask, target_col].mean())
 
         n = len(y_fit)
         groups_result: dict = {}
-        for col, group in col_to_group.items():
-            if col not in model.params.index:
+        for cname, group in col_to_group.items():
+            if cname not in model.params.index:
                 continue
-            coef = float(model.params[col])
-            pval = float(model.pvalues[col])
-            ci = model.conf_int().loc[col]
+            coef = float(model.params[cname])
+            pval = float(model.pvalues[cname])
+            ci = model.conf_int().loc[cname]
             gap_pct = float(coef / avg_ref * 100) if avg_ref > 0 else None
             groups_result[group] = {
                 "unexplained_gap_vs_highest_paid_pct": round(gap_pct, 2) if gap_pct is not None else None,
@@ -291,6 +306,245 @@ def run_ethnicity_regression(df: pd.DataFrame, has_years: bool, has_perf: bool) 
         }
     except Exception as exc:
         return {"error": f"Regression failed: {exc}"}
+
+
+def run_gender_regression(df: pd.DataFrame, has_years: bool, has_perf: bool) -> dict:
+    return _run_gender_regression_on(df, "Salary", has_years, has_perf)
+
+
+def run_ethnicity_regression(df: pd.DataFrame, has_years: bool, has_perf: bool) -> dict:
+    return _run_ethnicity_regression_on(df, "Salary", has_years, has_perf)
+
+
+# ── New analysis builders ──────────────────────────────────────────────────────
+
+def build_bonus_analysis(df: pd.DataFrame, has_race_ethnicity: bool) -> dict:
+    df = df.copy()
+    df["Bonus"] = pd.to_numeric(df["Bonus"].apply(clean_salary), errors="coerce").fillna(0)
+
+    by_gender_mean = df.groupby("Gender")["Bonus"].mean()
+    participation = df.groupby("Gender").apply(lambda x: (x["Bonus"] > 0).mean() * 100)
+    highest = float(by_gender_mean.max())
+
+    by_gender_result: dict = {}
+    for gender in by_gender_mean.index:
+        avg = float(by_gender_mean[gender])
+        by_gender_result[str(gender)] = {
+            "average_bonus": round(avg, 2),
+            "bonus_gap_vs_highest_pct": round((highest - avg) / highest * 100, 2) if highest > 0 else 0.0,
+            "participation_rate_pct": round(float(participation.get(gender, 0)), 2),
+        }
+
+    by_level_gender = df.groupby(["Job Level", "Gender"])["Bonus"].mean()
+    by_job_level: dict = {}
+    for (level, gender), avg in by_level_gender.items():
+        lk = str(level)
+        if lk not in by_job_level:
+            by_job_level[lk] = {}
+        by_job_level[lk][str(gender)] = round(float(avg), 2)
+
+    result: dict = {"by_gender": by_gender_result, "by_job_level_and_gender": by_job_level}
+
+    if has_race_ethnicity:
+        by_race_mean = df.groupby("Race/Ethnicity")["Bonus"].mean()
+        highest_race = float(by_race_mean.max())
+        result["by_race_ethnicity"] = {
+            str(g): {
+                "average_bonus": round(float(v), 2),
+                "bonus_gap_vs_highest_pct": round((highest_race - float(v)) / highest_race * 100, 2)
+                if highest_race > 0 else 0.0,
+            }
+            for g, v in by_race_mean.items()
+        }
+
+    return result
+
+
+def build_total_comp_analysis(
+    df: pd.DataFrame, has_race_ethnicity: bool, has_years: bool, has_perf: bool, has_bonus: bool
+) -> dict:
+    df = df.copy()
+    df["Total Compensation"] = pd.to_numeric(
+        df["Total Compensation"].apply(clean_salary), errors="coerce"
+    )
+    df_tc = df.dropna(subset=["Total Compensation"]).copy()
+
+    if df_tc.empty:
+        return {"error": "No valid Total Compensation values found after cleaning."}
+
+    unadjusted: dict = {
+        "by_gender": gap_table(df_tc.groupby("Gender")["Total Compensation"].mean()),
+    }
+    adjusted: dict = {
+        "by_gender_within_job_level": adjusted_gap_table(df_tc, "Gender", "Total Compensation"),
+    }
+
+    if has_race_ethnicity:
+        unadjusted["by_race_ethnicity"] = gap_table(
+            df_tc.groupby("Race/Ethnicity")["Total Compensation"].mean()
+        )
+        adjusted["by_race_within_job_level"] = adjusted_gap_table(
+            df_tc, "Race/Ethnicity", "Total Compensation"
+        )
+
+    bonus_note = "Bonus data is available but was not included as a control variable in this regression."
+
+    gender_reg = _run_gender_regression_on(df_tc, "Total Compensation", has_years, has_perf)
+    if has_bonus and "error" not in gender_reg:
+        gender_reg["note"] = bonus_note
+    regression: dict = {"gender_regression": gender_reg}
+
+    if has_race_ethnicity:
+        eth_reg = _run_ethnicity_regression_on(df_tc, "Total Compensation", has_years, has_perf)
+        if has_bonus and "error" not in eth_reg:
+            eth_reg["note"] = bonus_note
+        regression["ethnicity_regression"] = eth_reg
+
+    return {"unadjusted_gap": unadjusted, "adjusted_gap": adjusted, "regression": regression}
+
+
+def build_compa_ratio_analysis(df: pd.DataFrame, has_race_ethnicity: bool) -> dict:
+    df = df.copy()
+    for col in ("Pay Band Min", "Pay Band Max", "Pay Band Mid"):
+        df[col] = pd.to_numeric(df[col].apply(clean_salary), errors="coerce")
+
+    df["_compa_ratio"] = df["Salary"] / df["Pay Band Mid"] * 100
+
+    dq_count = int(((df["_compa_ratio"] < 30) | (df["_compa_ratio"] > 300)).sum())
+    df_cr = df[df["_compa_ratio"].between(30, 300)].copy()
+
+    if df_cr.empty:
+        return {"error": "No valid compa-ratio values found after data quality filtering."}
+
+    by_gender_mean = df_cr.groupby("Gender")["_compa_ratio"].mean()
+    below_90 = df_cr.groupby("Gender").apply(lambda x: (x["_compa_ratio"] < 90).mean() * 100)
+    above_110 = df_cr.groupby("Gender").apply(lambda x: (x["_compa_ratio"] > 110).mean() * 100)
+
+    by_gender_result: dict = {}
+    for gender in by_gender_mean.index:
+        by_gender_result[str(gender)] = {
+            "average_compa_ratio": round(float(by_gender_mean[gender]), 2),
+            "pct_below_90": round(float(below_90.get(gender, 0)), 2),
+            "pct_above_110": round(float(above_110.get(gender, 0)), 2),
+        }
+
+    by_level_gender = df_cr.groupby(["Job Level", "Gender"])["_compa_ratio"].mean()
+    by_job_level: dict = {}
+    for (level, gender), avg in by_level_gender.items():
+        lk = str(level)
+        if lk not in by_job_level:
+            by_job_level[lk] = {}
+        by_job_level[lk][str(gender)] = round(float(avg), 2)
+
+    at_risk: list = []
+    for _, row in df[df["_compa_ratio"] < 80].iterrows():
+        entry: dict = {
+            "department": str(row["Department"]),
+            "job_level": str(row["Job Level"]),
+            "gender": str(row["Gender"]),
+            "salary": round(float(row["Salary"]), 2),
+            "compa_ratio": round(float(row["_compa_ratio"]), 2),
+            "flag": "at risk of underpay",
+        }
+        if "Employee ID" in df.columns:
+            entry["employee_id"] = str(row["Employee ID"])
+        if "Race/Ethnicity" in df.columns:
+            entry["race_ethnicity"] = str(row["Race/Ethnicity"])
+        at_risk.append(entry)
+
+    result: dict = {
+        "by_gender": by_gender_result,
+        "by_job_level_and_gender": by_job_level,
+        "at_risk_of_underpay": at_risk,
+    }
+
+    if has_race_ethnicity:
+        by_race = df_cr.groupby("Race/Ethnicity")["_compa_ratio"].mean()
+        result["by_race_ethnicity"] = {str(k): round(float(v), 2) for k, v in by_race.items()}
+
+    if dq_count > 0:
+        result["data_quality_warning"] = (
+            f"{dq_count} employee(s) had compa-ratio values outside the expected range (30–300) "
+            "and were excluded from this analysis."
+        )
+
+    return result
+
+
+def build_intersectionality_analysis(df: pd.DataFrame) -> dict:
+    df = df.copy()
+    df["_intersect"] = df["Gender"].astype(str) + " - " + df["Race/Ethnicity"].astype(str)
+
+    agg = df.groupby("_intersect")["Salary"].agg(average_salary="mean", headcount="count")
+    valid_agg = agg[agg["headcount"] >= 3]
+    highest = float(valid_agg["average_salary"].max()) if not valid_agg.empty else 0.0
+
+    result: dict = {}
+    for group, row in agg.iterrows():
+        count = int(row["headcount"])
+        if count < 3:
+            result[str(group)] = {"result": "Insufficient data", "headcount": count}
+        else:
+            avg = float(row["average_salary"])
+            result[str(group)] = {
+                "average_salary": round(avg, 2),
+                "headcount": count,
+                "pay_gap_vs_highest_pct": round((highest - avg) / highest * 100, 2) if highest > 0 else 0.0,
+            }
+
+    return result
+
+
+def build_starting_salary_analysis(df: pd.DataFrame, has_race_ethnicity: bool) -> dict:
+    df = df.copy()
+    df["_hire_date"] = pd.to_datetime(df["Hire Date"], errors="coerce")
+    still_null = df["_hire_date"].isna() & df["Hire Date"].notna()
+    if still_null.any():
+        df.loc[still_null, "_hire_date"] = pd.to_datetime(
+            df.loc[still_null, "Hire Date"], dayfirst=True, errors="coerce"
+        )
+
+    df["_hire_year"] = df["_hire_date"].dt.year
+    cutoff_year = date.today().year - 2
+    recent = df[df["_hire_year"] >= cutoff_year].copy()
+
+    if recent.empty:
+        return {"note": f"No employees hired since {cutoff_year} found in the dataset."}
+
+    level_avg = df.groupby("Job Level")["Salary"].mean()
+
+    def group_summary(gdf: pd.DataFrame) -> dict:
+        flagged: list = []
+        for level, ldf in gdf.groupby("Job Level"):
+            avg_sal = float(ldf["Salary"].mean())
+            level_overall = level_avg.get(level)
+            if level_overall is not None and float(level_overall) > 0:
+                pct_diff = (avg_sal - float(level_overall)) / float(level_overall) * 100
+                if pct_diff < -5:
+                    flagged.append({
+                        "job_level": str(level),
+                        "group_average_salary": round(avg_sal, 2),
+                        "level_overall_average_salary": round(float(level_overall), 2),
+                        "pct_below_level_average": round(abs(pct_diff), 2),
+                    })
+        return {
+            "average_starting_salary": round(float(gdf["Salary"].mean()), 2),
+            "headcount": int(len(gdf)),
+            "flagged_below_level_average": flagged,
+        }
+
+    result: dict = {
+        "recent_hire_cutoff_year": int(cutoff_year),
+        "recent_hire_count": int(len(recent)),
+        "by_gender": {str(g): group_summary(gdf) for g, gdf in recent.groupby("Gender")},
+    }
+
+    if has_race_ethnicity:
+        result["by_race_ethnicity"] = {
+            str(g): group_summary(gdf) for g, gdf in recent.groupby("Race/Ethnicity")
+        }
+
+    return result
 
 
 @app.post("/analyze")
@@ -336,6 +590,13 @@ async def analyze(file: UploadFile = File(...)):
     has_race_ethnicity = "Race/Ethnicity" in df.columns
     has_years_at_company = "Years at Company" in df.columns
     has_performance_rating = "Performance Rating" in df.columns
+    has_bonus = "Bonus" in df.columns
+    has_total_comp = "Total Compensation" in df.columns
+    has_hire_date = "Hire Date" in df.columns
+    has_pay_band_min = "Pay Band Min" in df.columns
+    has_pay_band_max = "Pay Band Max" in df.columns
+    has_pay_band_mid = "Pay Band Mid" in df.columns
+    has_compa_ratio = has_pay_band_min and has_pay_band_max and has_pay_band_mid
 
     # Clean and validate salary
     df["Salary"] = df["Salary"].apply(clean_salary)
@@ -346,7 +607,7 @@ async def analyze(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="No valid salary rows found in the CSV.")
 
     # ── available_analyses ────────────────────────────────────────────────────
-    skipped_reasons = {}
+    skipped_reasons: dict = {}
     if not has_race_ethnicity:
         skipped_reasons["ethnicity_gap"] = "Race/Ethnicity column not found"
     if not has_years_at_company:
@@ -355,26 +616,39 @@ async def analyze(file: UploadFile = File(...)):
         skipped_reasons["performance_analysis"] = "Performance Rating column not found"
     if not has_employee_id:
         skipped_reasons["outlier_tracking"] = "Employee ID column not found"
+    if not has_bonus:
+        skipped_reasons["bonus_analysis"] = "Bonus column not found"
+    if not has_total_comp:
+        skipped_reasons["total_comp_analysis"] = "Total Compensation column not found"
+    if not has_compa_ratio:
+        skipped_reasons["compa_ratio_analysis"] = "Pay Band Min, Max and Mid columns not all present"
+    if not has_hire_date:
+        skipped_reasons["starting_salary_analysis"] = "Hire Date column not found"
 
-    available_analyses = {
+    available_analyses: dict = {
         "gender_gap": True,
         "department_breakdown": True,
         "ethnicity_gap": has_race_ethnicity,
         "tenure_analysis": has_years_at_company,
         "performance_analysis": has_performance_rating,
         "outlier_tracking": has_employee_id,
+        "bonus_analysis": has_bonus,
+        "total_comp_analysis": has_total_comp,
+        "compa_ratio_analysis": has_compa_ratio,
+        "intersectionality_analysis": has_race_ethnicity,
+        "starting_salary_analysis": has_hire_date,
         "skipped_reasons": skipped_reasons,
     }
 
     # ── Gender pay gap ────────────────────────────────────────────────────────
-    unadjusted_pay_gap = {
+    unadjusted_pay_gap: dict = {
         "by_gender": gap_table(df.groupby("Gender")["Salary"].mean()),
     }
-    adjusted_pay_gap = {
+    adjusted_pay_gap: dict = {
         "by_gender_within_job_level": adjusted_gap_table(df, "Gender"),
     }
 
-    # ── Race/Ethnicity pay gap (optional) ─────────────────────────────────────
+    # ── Race/Ethnicity pay gap (optional) ────────────────────────────────────
     if has_race_ethnicity:
         unadjusted_pay_gap["by_race_ethnicity"] = gap_table(
             df.groupby("Race/Ethnicity")["Salary"].mean()
@@ -418,7 +692,7 @@ async def analyze(file: UploadFile = File(...)):
     df["_ratio"] = df["Salary"] / df["_peer_avg"]
     flagged_rows = df[(df["_ratio"] > 1.20) | (df["_ratio"] < 0.80)]
 
-    flagged_outliers = []
+    flagged_outliers: list = []
     for _, row in flagged_rows.iterrows():
         entry: dict = {
             "department": str(row["Department"]),
@@ -443,7 +717,6 @@ async def analyze(file: UploadFile = File(...)):
         .agg(average_salary="mean", headcount="count")
         .reset_index()
     )
-
     department_summary: dict = {}
     for _, row in dept_gender.iterrows():
         dept = str(row["Department"])
@@ -465,7 +738,7 @@ async def analyze(file: UploadFile = File(...)):
             }
 
     # ── Summary ───────────────────────────────────────────────────────────────
-    summary = {
+    summary: dict = {
         "total_employees": len(df),
         "total_departments": int(df["Department"].nunique()),
         "total_job_levels": int(df["Job Level"].nunique()),
@@ -488,14 +761,38 @@ async def analyze(file: UploadFile = File(...)):
     if performance_analysis is not None:
         response["performance_analysis"] = performance_analysis
 
-    # ── Regression analysis ───────────────────────────────────────────────────
-    regression_analysis: dict = {
-        "gender_regression": run_gender_regression(df, has_years_at_company, has_performance_rating),
-    }
-    if has_race_ethnicity:
-        regression_analysis["ethnicity_regression"] = run_ethnicity_regression(
-            df, has_years_at_company, has_performance_rating
+    # ── New optional analyses ─────────────────────────────────────────────────
+    if has_bonus:
+        response["bonus_analysis"] = build_bonus_analysis(df, has_race_ethnicity)
+
+    if has_total_comp:
+        response["total_comp_analysis"] = build_total_comp_analysis(
+            df, has_race_ethnicity, has_years_at_company, has_performance_rating, has_bonus
         )
+
+    if has_compa_ratio:
+        response["compa_ratio_analysis"] = build_compa_ratio_analysis(df, has_race_ethnicity)
+
+    if has_race_ethnicity:
+        response["intersectionality_analysis"] = build_intersectionality_analysis(df)
+
+    if has_hire_date:
+        response["starting_salary_analysis"] = build_starting_salary_analysis(df, has_race_ethnicity)
+
+    # ── Regression analysis ───────────────────────────────────────────────────
+    bonus_note = "Bonus data is available but was not included as a control variable in this regression."
+
+    gender_reg = run_gender_regression(df, has_years_at_company, has_performance_rating)
+    if has_bonus and "error" not in gender_reg:
+        gender_reg["note"] = bonus_note
+    regression_analysis: dict = {"gender_regression": gender_reg}
+
+    if has_race_ethnicity:
+        eth_reg = run_ethnicity_regression(df, has_years_at_company, has_performance_rating)
+        if has_bonus and "error" not in eth_reg:
+            eth_reg["note"] = bonus_note
+        regression_analysis["ethnicity_regression"] = eth_reg
+
     response["regression_analysis"] = regression_analysis
 
     return response
