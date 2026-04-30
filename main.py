@@ -28,8 +28,8 @@ COLUMN_VARIANTS = {
     "Job Level": ["job level", "level", "grade", "band", "seniority", "tier"],
     "Department": ["department", "dept", "team", "division", "business unit"],
     "Race/Ethnicity": ["race/ethnicity", "ethnicity", "race", "diversity"],
-    "Years at Company": ["years at company", "tenure", "years"],
-    "Performance Rating": ["performance rating", "performance", "rating", "review"],
+    "Years at Company": ["years at company", "tenure", "years", "seniority", "length of service", "service years"],
+    "Performance Rating": ["performance rating", "performance", "rating", "review", "score", "annual rating"],
     "Employee ID": ["employee id", "employee_id", "emp id", "emp_id"],
     "Job Title": ["job title", "job_title", "title", "position", "role"],
     "Bonus": ["bonus", "bonus amount", "annual bonus", "variable pay", "incentive"],
@@ -64,18 +64,20 @@ def resolve_columns(df_columns: list) -> dict:
 def clean_salary(value):
     if pd.isna(value):
         return np.nan
-    cleaned = (
-        str(value)
-        .replace("£", "")
-        .replace("$", "")
-        .replace("€", "")
-    )
-    cleaned = re.sub(r"(?<=\d),(?=\d)", "", cleaned)  # remove thousands separators
-    cleaned = cleaned.replace(" ", "").strip()
-    if not cleaned:
+    s = str(value).strip()
+    s = s.replace("£", "").replace("$", "").replace("€", "")
+    s = s.replace(" ", "")
+    if not s:
         return np.nan
+    if s[-1].lower() == "k":
+        try:
+            return float(s[:-1]) * 1000
+        except ValueError:
+            logger.warning("Could not parse numeric value %r — row will be skipped", value)
+            return np.nan
+    s = re.sub(r"(?<=\d),(?=\d)", "", s)
     try:
-        return float(cleaned)
+        return float(s)
     except ValueError:
         logger.warning("Could not parse numeric value %r — row will be skipped", value)
         return np.nan
@@ -532,7 +534,10 @@ def build_starting_salary_analysis(df: pd.DataFrame, has_race_ethnicity: bool) -
         )
 
     df["_hire_year"] = df["_hire_date"].dt.year
-    cutoff_year = date.today().year - 2
+    max_hire_date = df["_hire_date"].max()
+    if pd.isna(max_hire_date):
+        return {"note": "No valid hire dates found in the dataset."}
+    cutoff_year = max_hire_date.year - 3
     recent = df[df["_hire_year"] >= cutoff_year].copy()
 
     if recent.empty:
@@ -627,12 +632,20 @@ async def analyze(file: UploadFile = File(...)):
     has_compa_ratio = has_pay_band_min and has_pay_band_max and has_pay_band_mid
 
     # Clean and validate salary
+    original_salaries = df["Salary"].copy()
     df["Salary"] = df["Salary"].apply(clean_salary)
     df["Salary"] = pd.to_numeric(df["Salary"], errors="coerce")
+
+    failed_mask = df["Salary"].isna() & original_salaries.notna()
+    failed_examples = [str(v) for v in original_salaries[failed_mask].head(5).tolist()]
+
     df = df.dropna(subset=["Salary"]).copy()
 
-    if df.empty:
-        raise HTTPException(status_code=400, detail="No valid salary rows found in the CSV.")
+    if len(df) < 3:
+        detail = "No valid salary rows found in the CSV." if df.empty else "Fewer than 3 valid salary rows found in the CSV."
+        if failed_examples:
+            detail += f" Example values that failed to parse: {', '.join(failed_examples)}."
+        raise HTTPException(status_code=400, detail=detail)
 
     # ── available_analyses ────────────────────────────────────────────────────
     skipped_reasons: dict = {}
@@ -722,10 +735,11 @@ async def analyze(file: UploadFile = File(...)):
 
     flagged_outliers: list = []
     for _, row in flagged_rows.iterrows():
+        gender_val = row["Gender"]
         entry: dict = {
             "department": str(row["Department"]),
             "job_level": str(row["Job Level"]),
-            "gender": str(row["Gender"]),
+            "gender": "Not specified" if (pd.isna(gender_val) or str(gender_val).strip().lower() in {"", "nan", "none", "null"}) else str(gender_val),
             "salary": round(float(row["Salary"]), 2),
             "peer_group_average": round(float(row["_peer_avg"]), 2),
             "variance_pct": round((float(row["_ratio"]) - 1) * 100, 2),
