@@ -619,6 +619,7 @@ async def analyze(file: UploadFile = File(...)):
     # ── STEP 3: rename all detected columns to standard names in one operation ────
     rename_dict = {actual: std for std, actual in column_map.items()}
     df = df.rename(columns=rename_dict)
+    assert "Salary" in df.columns, f"Rename failed, columns are: {list(df.columns)}"
 
     original_salary_col = column_map.get("Salary", "salary")
     logger.info("Salary column mapped from %r", original_salary_col)
