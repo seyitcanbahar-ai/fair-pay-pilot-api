@@ -22,43 +22,10 @@ app.add_middleware(
 
 MANDATORY_FIELDS = ["Salary", "Gender", "Job Level", "Department"]
 
-COLUMN_VARIANTS = {
-    "Salary": ["salary", "pay", "annual salary", "compensation", "base salary", "base pay"],
-    "Gender": ["gender", "sex"],
-    "Job Level": ["job level", "level", "grade", "band", "seniority", "tier"],
-    "Department": ["department", "dept", "team", "division", "business unit"],
-    "Race/Ethnicity": ["race/ethnicity", "ethnicity", "race", "diversity"],
-    "Years at Company": ["years at company", "tenure", "years", "seniority", "length of service", "service years"],
-    "Performance Rating": ["performance rating", "performance", "rating", "review", "score", "annual rating"],
-    "Employee ID": ["employee id", "employee_id", "emp id", "emp_id"],
-    "Job Title": ["job title", "job_title", "title", "position", "role"],
-    "Bonus": ["bonus", "bonus amount", "annual bonus", "variable pay", "incentive"],
-    "Total Compensation": ["total compensation", "total comp", "total pay", "total reward"],
-    "Hire Date": ["hire date", "start date", "date joined", "join date"],
-    "Pay Band Min": ["pay band min", "band min", "salary band min", "range min"],
-    "Pay Band Max": ["pay band max", "band max", "salary band max", "range max"],
-    "Pay Band Mid": ["pay band mid", "band mid", "midpoint", "salary midpoint"],
-}
-
 
 def _preprocess_csv_text(text: str) -> str:
-    """Remove thousands-separator commas (e.g. £82,000 → £82000) before pandas sees the text.
-
-    Without this, an unquoted value like £82,000 looks like two fields to the CSV
-    parser and raises "Expected N fields, saw N+1".
-    """
+    """Remove thousands-separator commas (£82,000 → £82000) before pandas parses."""
     return re.sub(r"(?<=\d),(?=\d)", "", text)
-
-
-def resolve_columns(df_columns: list) -> dict:
-    col_lower_map = {c.lower().strip(): c for c in df_columns}
-    resolved = {}
-    for canonical, variants in COLUMN_VARIANTS.items():
-        for variant in variants:
-            if variant in col_lower_map:
-                resolved[canonical] = col_lower_map[variant]
-                break
-    return resolved
 
 
 def clean_salary(value):
@@ -591,57 +558,110 @@ async def analyze(file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not read CSV: {exc}")
 
-    # Strip BOM and invisible whitespace from column names before anything else
+    # ── STEP 1: normalise all column names to lowercase, stripping BOM and spaces ─
     df.columns = df.columns.str.strip()
-    df.columns = df.columns.str.replace('﻿', '', regex=False)
+    df.columns = df.columns.str.replace("﻿", "", regex=False)
+    df.columns = df.columns.str.lower()
 
-    # Trim whitespace from all string columns and drop completely empty rows
+    # Strip string cell values and drop completely empty rows
     for col in df.select_dtypes(include="object").columns:
         df[col] = df[col].str.strip()
     df = df.dropna(how="all").copy()
 
-    # Resolve CSV columns to canonical names (case-insensitive, variant-aware)
-    col_map = resolve_columns(list(df.columns))
+    # ── STEP 2: detect which actual column maps to each standard name ─────────────
+    salary_variations        = ["salary", "pay", "annual salary", "compensation", "base salary", "base pay"]
+    gender_variations        = ["gender", "sex"]
+    job_level_variations     = ["job level", "level", "grade", "band", "seniority", "tier"]
+    department_variations    = ["department", "dept", "team", "division", "business unit"]
+    ethnicity_variations     = ["race/ethnicity", "ethnicity", "race", "diversity", "race ethnicity"]
+    tenure_variations        = ["years at company", "tenure", "years", "length of service", "service years"]
+    performance_variations   = ["performance rating", "performance", "rating", "review", "score", "annual rating"]
+    bonus_variations         = ["bonus", "bonus amount", "annual bonus", "variable pay", "incentive"]
+    employee_id_variations   = ["employee id", "emp id", "id", "staff id", "employeeid", "employee_id"]
+    job_title_variations     = ["job title", "title", "position", "role"]
+    hire_date_variations     = ["hire date", "start date", "date joined", "join date", "start year"]
+    total_comp_variations    = ["total compensation", "total comp", "total pay", "total reward"]
+    band_min_variations      = ["pay band min", "band min", "salary band min", "range min"]
+    band_max_variations      = ["pay band max", "band max", "salary band max", "range max"]
+    band_mid_variations      = ["pay band mid", "band mid", "midpoint", "salary midpoint"]
 
-    missing_mandatory = [f for f in MANDATORY_FIELDS if f not in col_map]
+    actual_cols = set(df.columns)
+    column_map: dict = {}   # standard_name → actual_col_name (lowercase)
+    claimed: set = set()    # prevent one column being claimed by two standard names
+
+    for std_name, variations in [
+        ("Salary",             salary_variations),
+        ("Gender",             gender_variations),
+        ("Job Level",          job_level_variations),
+        ("Department",         department_variations),
+        ("Race/Ethnicity",     ethnicity_variations),
+        ("Years at Company",   tenure_variations),
+        ("Performance Rating", performance_variations),
+        ("Bonus",              bonus_variations),
+        ("Employee ID",        employee_id_variations),
+        ("Job Title",          job_title_variations),
+        ("Hire Date",          hire_date_variations),
+        ("Total Compensation", total_comp_variations),
+        ("Pay Band Min",       band_min_variations),
+        ("Pay Band Max",       band_max_variations),
+        ("Pay Band Mid",       band_mid_variations),
+    ]:
+        for v in variations:
+            if v in actual_cols and v not in claimed:
+                column_map[std_name] = v
+                claimed.add(v)
+                break
+
+    # ── STEP 3: rename all detected columns to standard names in one operation ────
+    rename_dict = {actual: std for std, actual in column_map.items()}
+    df = df.rename(columns=rename_dict)
+
+    original_salary_col = column_map.get("Salary", "salary")
+    logger.info("Salary column mapped from %r", original_salary_col)
+
+    # ── STEP 4: validate mandatory columns ────────────────────────────────────────
+    missing_mandatory = [f for f in MANDATORY_FIELDS if f not in df.columns]
     if missing_mandatory:
         raise HTTPException(
             status_code=400,
             detail={
                 "message": "CSV is missing required columns.",
                 "missing_fields": missing_mandatory,
+                "detected_columns": sorted(df.columns.tolist()),
                 "hint": {
-                    "Salary": "accepted names: salary, pay, compensation, annual salary, base salary, base pay",
-                    "Gender": "accepted names: gender, sex",
-                    "Job Level": "accepted names: job level, level, grade, band, seniority",
-                    "Department": "accepted names: department, dept, team, division",
+                    "Salary": "accepted names: " + ", ".join(salary_variations),
+                    "Gender": "accepted names: " + ", ".join(gender_variations),
+                    "Job Level": "accepted names: " + ", ".join(job_level_variations),
+                    "Department": "accepted names: " + ", ".join(department_variations),
                 },
             },
         )
 
-    # ── Step 1: rename all columns to canonical names BEFORE any data parsing ────
-    df = df.rename(columns={v: k for k, v in col_map.items()})
-
-    # Record the original CSV column name that was mapped to Salary for diagnostics
-    original_salary_col = col_map.get("Salary", "Salary")
-    logger.info("Salary column mapped from original CSV column %r", original_salary_col)
-
-    has_employee_id = "Employee ID" in df.columns
-    has_job_title = "Job Title" in df.columns
-    has_race_ethnicity = "Race/Ethnicity" in df.columns
-    has_years_at_company = "Years at Company" in df.columns
+    has_employee_id      = "Employee ID"        in df.columns
+    has_job_title        = "Job Title"           in df.columns
+    has_race_ethnicity   = "Race/Ethnicity"      in df.columns
+    has_years_at_company = "Years at Company"    in df.columns
     has_performance_rating = "Performance Rating" in df.columns
-    has_bonus = "Bonus" in df.columns
-    has_total_comp = "Total Compensation" in df.columns
-    has_hire_date = "Hire Date" in df.columns
-    has_pay_band_min = "Pay Band Min" in df.columns
-    has_pay_band_max = "Pay Band Max" in df.columns
-    has_pay_band_mid = "Pay Band Mid" in df.columns
-    has_compa_ratio = has_pay_band_min and has_pay_band_max and has_pay_band_mid
+    has_bonus            = "Bonus"               in df.columns
+    has_total_comp       = "Total Compensation"  in df.columns
+    has_hire_date        = "Hire Date"           in df.columns
+    has_pay_band_min     = "Pay Band Min"        in df.columns
+    has_pay_band_max     = "Pay Band Max"        in df.columns
+    has_pay_band_mid     = "Pay Band Mid"        in df.columns
+    has_compa_ratio      = has_pay_band_min and has_pay_band_max and has_pay_band_mid
 
-    # ── Step 2: parse and clean the salary column (always "Salary" after mapping) ─
-    raw_salary_sample = [str(v) for v in df["Salary"].dropna().head(5).tolist()]
-    logger.debug("Raw salary sample before cleaning: %s", raw_salary_sample)
+    # ── STEP 5: clean the Salary column ──────────────────────────────────────────
+    salary_probe = df["Salary"].dropna().head(20)
+    if not salary_probe.empty:
+        if pd.to_numeric(salary_probe.apply(clean_salary), errors="coerce").notna().sum() == 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Salary column appears to contain non-numeric data. "
+                    f"Detected column: '{original_salary_col}'. "
+                    "Please check your column mapping."
+                ),
+            )
 
     original_salaries = df["Salary"].copy()
     df["Salary"] = df["Salary"].apply(clean_salary)
@@ -653,13 +673,12 @@ async def analyze(file: UploadFile = File(...)):
     df = df.dropna(subset=["Salary"]).copy()
 
     if len(df) < 3:
-        detail = "No valid salary rows found in the CSV." if df.empty else "Fewer than 3 valid salary rows found in the CSV."
+        detail = "No valid salary rows found in the CSV." if df.empty else "Fewer than 3 valid salary rows found."
         if failed_examples:
-            detail += f" Example values that failed to parse: {', '.join(failed_examples)}."
-        detail += f" Raw salary sample (before cleaning): {raw_salary_sample}."
+            detail += f" Values that failed to parse: {', '.join(failed_examples)}."
         raise HTTPException(status_code=400, detail=detail)
 
-    # ── available_analyses ────────────────────────────────────────────────────
+    # ── STEP 6: run all analyses ──────────────────────────────────────────────────
     skipped_reasons: dict = {}
     if not has_race_ethnicity:
         skipped_reasons["ethnicity_gap"] = "Race/Ethnicity column not found"
@@ -693,7 +712,7 @@ async def analyze(file: UploadFile = File(...)):
         "skipped_reasons": skipped_reasons,
     }
 
-    # ── Gender pay gap ────────────────────────────────────────────────────────
+    # ── Gender pay gap ────────────────────────────────────────────────────────────
     unadjusted_pay_gap: dict = {
         "by_gender": gap_table(df.groupby("Gender")["Salary"].mean()),
     }
@@ -701,46 +720,51 @@ async def analyze(file: UploadFile = File(...)):
         "by_gender_within_job_level": adjusted_gap_table(df, "Gender"),
     }
 
-    # ── Race/Ethnicity pay gap (optional) ────────────────────────────────────
     if has_race_ethnicity:
         unadjusted_pay_gap["by_race_ethnicity"] = gap_table(
             df.groupby("Race/Ethnicity")["Salary"].mean()
         )
         adjusted_pay_gap["by_race_within_job_level"] = adjusted_gap_table(df, "Race/Ethnicity")
 
-    # ── Tenure analysis (optional) ────────────────────────────────────────────
+    # ── Tenure analysis ───────────────────────────────────────────────────────────
     tenure_analysis = None
     if has_years_at_company:
         df["Years at Company"] = pd.to_numeric(df["Years at Company"], errors="coerce")
-        bins = [0, 1, 3, 5, 10, float("inf")]
-        labels = ["<1 year", "1-3 years", "3-5 years", "5-10 years", "10+ years"]
-        df["_tenure_band"] = pd.cut(df["Years at Company"], bins=bins, labels=labels, right=False)
-        agg = df.groupby("_tenure_band", observed=True)["Salary"].agg(
-            average_salary="mean", headcount="count"
-        )
-        tenure_analysis = {
-            str(band): {
-                "average_salary": round(float(row["average_salary"]), 2),
-                "headcount": int(row["headcount"]),
+        tenure_df = df.dropna(subset=["Years at Company"]).copy()
+        if not tenure_df.empty:
+            bins = [0, 1, 3, 5, 10, float("inf")]
+            labels = ["<1 year", "1-3 years", "3-5 years", "5-10 years", "10+ years"]
+            tenure_df["_tenure_band"] = pd.cut(
+                tenure_df["Years at Company"], bins=bins, labels=labels, right=False
+            )
+            agg = tenure_df.groupby("_tenure_band", observed=True)["Salary"].agg(
+                average_salary="mean", headcount="count"
+            )
+            tenure_analysis = {
+                str(band): {
+                    "average_salary": round(float(row["average_salary"]), 2),
+                    "headcount": int(row["headcount"]),
+                }
+                for band, row in agg.iterrows()
             }
-            for band, row in agg.iterrows()
-        }
 
-    # ── Performance vs pay analysis (optional) ────────────────────────────────
+    # ── Performance vs pay analysis ───────────────────────────────────────────────
     performance_analysis = None
     if has_performance_rating:
-        agg = df.groupby("Performance Rating")["Salary"].agg(
-            average_salary="mean", headcount="count"
-        )
-        performance_analysis = {
-            str(rating): {
-                "average_salary": round(float(row["average_salary"]), 2),
-                "headcount": int(row["headcount"]),
+        perf_df = df.dropna(subset=["Performance Rating"]).copy()
+        if not perf_df.empty:
+            agg = perf_df.groupby("Performance Rating")["Salary"].agg(
+                average_salary="mean", headcount="count"
+            )
+            performance_analysis = {
+                str(rating): {
+                    "average_salary": round(float(row["average_salary"]), 2),
+                    "headcount": int(row["headcount"]),
+                }
+                for rating, row in agg.iterrows()
             }
-            for rating, row in agg.iterrows()
-        }
 
-    # ── Outlier detection ─────────────────────────────────────────────────────
+    # ── Outlier detection ─────────────────────────────────────────────────────────
     df["_peer_avg"] = df.groupby("Job Level")["Salary"].transform("mean")
     df["_ratio"] = df["Salary"] / df["_peer_avg"]
     flagged_rows = df[(df["_ratio"] > 1.20) | (df["_ratio"] < 0.80)]
@@ -751,7 +775,7 @@ async def analyze(file: UploadFile = File(...)):
         entry: dict = {
             "department": str(row["Department"]),
             "job_level": str(row["Job Level"]),
-            "gender": "Not specified" if (pd.isna(gender_val) or str(gender_val).strip().lower() in {"", "nan", "none", "null"}) else str(gender_val),
+            "gender": "Not specified" if pd.isna(gender_val) or str(gender_val).strip() == "" else str(gender_val),
             "salary": round(float(row["Salary"]), 2),
             "peer_group_average": round(float(row["_peer_avg"]), 2),
             "variance_pct": round((float(row["_ratio"]) - 1) * 100, 2),
@@ -765,7 +789,7 @@ async def analyze(file: UploadFile = File(...)):
             entry["race_ethnicity"] = str(row["Race/Ethnicity"])
         flagged_outliers.append(entry)
 
-    # ── Department summary ────────────────────────────────────────────────────
+    # ── Department summary ────────────────────────────────────────────────────────
     dept_gender = (
         df.groupby(["Department", "Gender"])["Salary"]
         .agg(average_salary="mean", headcount="count")
@@ -791,7 +815,7 @@ async def analyze(file: UploadFile = File(...)):
                 "headcount": int(row["headcount"]),
             }
 
-    # ── Summary ───────────────────────────────────────────────────────────────
+    # ── Summary ───────────────────────────────────────────────────────────────────
     summary: dict = {
         "total_employees": len(df),
         "total_departments": int(df["Department"].nunique()),
@@ -815,7 +839,6 @@ async def analyze(file: UploadFile = File(...)):
     if performance_analysis is not None:
         response["performance_analysis"] = performance_analysis
 
-    # ── New optional analyses ─────────────────────────────────────────────────
     if has_bonus:
         response["bonus_analysis"] = build_bonus_analysis(df, has_race_ethnicity)
 
@@ -833,7 +856,7 @@ async def analyze(file: UploadFile = File(...)):
     if has_hire_date:
         response["starting_salary_analysis"] = build_starting_salary_analysis(df, has_race_ethnicity)
 
-    # ── Regression analysis ───────────────────────────────────────────────────
+    # ── Regression analysis ───────────────────────────────────────────────────────
     bonus_note = "Bonus data is available but was not included as a control variable in this regression."
 
     gender_reg = run_gender_regression(df, has_years_at_company, has_performance_rating)
