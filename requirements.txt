@@ -1,6 +1,7 @@
 fastapi==0.115.12
 uvicorn[standard]==0.34.0
 pandas==2.2.3
-numpy==2.2.4
+numpy==1.26.4
 python-multipart==0.0.20
-statsmodels==0.14.4
+scipy==1.11.4
+statsmodels==0.14.1
