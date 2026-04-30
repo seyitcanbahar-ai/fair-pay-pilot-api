@@ -1,6 +1,7 @@
 import io
 import numpy as np
 import pandas as pd
+import statsmodels.api as sm
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -78,6 +79,218 @@ def adjusted_gap_table(df: pd.DataFrame, dimension: str) -> dict:
             for group, avg in subgroups.items()
         }
     return result
+
+
+def _convert_job_level_numeric(series: pd.Series, salary_series: pd.Series) -> pd.Series:
+    """Extract digits from level strings (L1→1). Falls back to salary-rank ordering."""
+    extracted = series.astype(str).str.extract(r"(\d+)", expand=False)
+    numeric = pd.to_numeric(extracted, errors="coerce")
+    if numeric.notna().mean() >= 0.5:
+        return numeric
+    medians = (
+        pd.DataFrame({"level": series, "salary": salary_series})
+        .groupby("level")["salary"]
+        .median()
+        .sort_values()
+    )
+    return series.map({lvl: i + 1 for i, lvl in enumerate(medians.index)})
+
+
+def _encode_gender_binary(series: pd.Series) -> "pd.Series | None":
+    """Female=1, Male=0. Returns None if values aren't recognisable."""
+    male_labels = {"male", "m", "man", "men"}
+    female_labels = {"female", "f", "woman", "women"}
+    lower = series.astype(str).str.lower().str.strip()
+    result = pd.Series(np.nan, index=series.index, dtype=float)
+    result[lower.isin(male_labels)] = 0.0
+    result[lower.isin(female_labels)] = 1.0
+    if (result == 0.0).any() and (result == 1.0).any():
+        return result
+    return None
+
+
+def _build_base_features(
+    df: pd.DataFrame, has_years: bool, has_perf: bool
+) -> "tuple[pd.DataFrame, list[str]]":
+    parts: list = []
+    controlled: list[str] = []
+
+    jl_num = _convert_job_level_numeric(df["Job Level"], df["Salary"])
+    if jl_num.nunique() > 1:
+        parts.append(jl_num.rename("job_level"))
+        controlled.append("Job Level")
+
+    if df["Department"].nunique() > 1:
+        dept_dummies = pd.get_dummies(df["Department"], prefix="dept", drop_first=True, dtype=float)
+        parts.append(dept_dummies)
+        controlled.append("Department")
+
+    if has_years and "Years at Company" in df.columns:
+        yrs = pd.to_numeric(df["Years at Company"], errors="coerce")
+        if yrs.nunique() > 1:
+            parts.append(yrs.rename("years_at_company"))
+            controlled.append("Years at Company")
+
+    if has_perf and "Performance Rating" in df.columns:
+        perf_num = pd.to_numeric(df["Performance Rating"], errors="coerce")
+        if perf_num.notna().mean() >= 0.5 and perf_num.nunique() > 1:
+            parts.append(perf_num.rename("performance_rating"))
+            controlled.append("Performance Rating")
+        elif df["Performance Rating"].nunique() > 1:
+            perf_dummies = pd.get_dummies(
+                df["Performance Rating"], prefix="perf", drop_first=True, dtype=float
+            )
+            parts.append(perf_dummies)
+            controlled.append("Performance Rating")
+
+    X = pd.concat(parts, axis=1) if parts else pd.DataFrame(index=df.index)
+    return X, controlled
+
+
+def _gender_interpretation(
+    gap_pct: "float | None", p_value: float, n: int, controlled: "list[str]"
+) -> str:
+    if gap_pct is None:
+        return "Could not calculate the gender pay gap percentage."
+    controls = ", ".join(v.lower() for v in controlled) if controlled else "available factors"
+    direction = "less" if gap_pct < 0 else "more"
+    abs_gap = abs(round(gap_pct, 1))
+    if p_value < 0.05:
+        sig = "This gap is statistically significant."
+    else:
+        sig = "This is not statistically significant — it could be due to chance given the sample size."
+    text = f"After controlling for {controls}, women are paid {abs_gap}% {direction} than men. {sig}"
+    if n < 50:
+        text += " Results should be treated with caution — fewer than 50 employees in the dataset reduces statistical reliability."
+    return text
+
+
+def _ethnicity_interpretation(
+    group: str, gap_pct: "float | None", p_value: float, n: int, reference_group: str
+) -> str:
+    if gap_pct is None:
+        return f"Could not calculate the pay gap for {group}."
+    direction = "less" if gap_pct < 0 else "more"
+    abs_gap = abs(round(gap_pct, 1))
+    if p_value < 0.05:
+        sig = "This gap is statistically significant."
+    else:
+        sig = "This gap is not statistically significant."
+    text = (
+        f"After controlling for job level and department, {group} employees are paid "
+        f"{abs_gap}% {direction} than {reference_group} employees. {sig}"
+    )
+    if n < 50:
+        text += " Results should be treated with caution — fewer than 50 employees in the dataset reduces statistical reliability."
+    return text
+
+
+def run_gender_regression(df: pd.DataFrame, has_years: bool, has_perf: bool) -> dict:
+    if len(df) < 20:
+        return {"error": "Sample too small for regression — fewer than 20 employees in the dataset."}
+    try:
+        X_base, controlled = _build_base_features(df, has_years, has_perf)
+
+        gender_enc = _encode_gender_binary(df["Gender"])
+        if gender_enc is None:
+            return {"error": "Could not encode Gender column — expected Male/Female values."}
+
+        X = pd.concat([X_base, gender_enc.rename("gender_female")], axis=1)
+        X = sm.add_constant(X)
+        y = df["Salary"]
+
+        valid = X.notna().all(axis=1) & y.notna()
+        X_fit, y_fit = X[valid], y[valid]
+
+        if len(y_fit) < 20:
+            return {"error": "Sample too small for regression after removing rows with missing values."}
+
+        model = sm.OLS(y_fit, X_fit).fit()
+
+        coef = float(model.params["gender_female"])
+        pval = float(model.pvalues["gender_female"])
+        ci = model.conf_int().loc["gender_female"]
+
+        male_mask = df["Gender"].astype(str).str.lower().str.strip().isin({"male", "m", "man", "men"})
+        avg_male_val = df.loc[valid & male_mask, "Salary"].mean()
+        gap_pct = float(coef / avg_male_val * 100) if pd.notna(avg_male_val) and avg_male_val > 0 else None
+
+        n = len(y_fit)
+        return {
+            "unexplained_gender_gap_pct": round(gap_pct, 2) if gap_pct is not None else None,
+            "is_significant": bool(pval < 0.05),
+            "p_value": round(pval, 3),
+            "confidence_interval": [round(float(ci.iloc[0]), 2), round(float(ci.iloc[1]), 2)],
+            "variables_controlled": controlled,
+            "sample_size_warning": n < 50,
+            "interpretation": _gender_interpretation(gap_pct, pval, n, controlled),
+        }
+    except Exception as exc:
+        return {"error": f"Regression failed: {exc}"}
+
+
+def run_ethnicity_regression(df: pd.DataFrame, has_years: bool, has_perf: bool) -> dict:
+    if len(df) < 20:
+        return {"error": "Sample too small for regression — fewer than 20 employees in the dataset."}
+    try:
+        unique_groups = [g for g in df["Race/Ethnicity"].dropna().unique()]
+        if len(unique_groups) < 2:
+            return {"error": "Fewer than 2 ethnicity groups found — regression not applicable."}
+
+        avg_by_eth = df.groupby("Race/Ethnicity")["Salary"].mean()
+        reference_group = str(avg_by_eth.idxmax())
+        other_groups = [str(g) for g in unique_groups if str(g) != reference_group]
+
+        X_base, controlled = _build_base_features(df, has_years, has_perf)
+
+        eth_features = pd.DataFrame(index=df.index)
+        col_to_group: dict = {}
+        for group in other_groups:
+            col_name = f"eth_{group}"
+            eth_features[col_name] = (df["Race/Ethnicity"].astype(str) == group).astype(float)
+            col_to_group[col_name] = group
+
+        X = pd.concat([X_base, eth_features], axis=1)
+        X = sm.add_constant(X)
+        y = df["Salary"]
+
+        valid = X.notna().all(axis=1) & y.notna() & df["Race/Ethnicity"].notna()
+        X_fit, y_fit = X[valid], y[valid]
+
+        if len(y_fit) < 20:
+            return {"error": "Sample too small for regression after removing rows with missing values."}
+
+        model = sm.OLS(y_fit, X_fit).fit()
+
+        ref_mask = df["Race/Ethnicity"].astype(str) == reference_group
+        avg_ref = float(df.loc[valid & ref_mask, "Salary"].mean())
+
+        n = len(y_fit)
+        groups_result: dict = {}
+        for col, group in col_to_group.items():
+            if col not in model.params.index:
+                continue
+            coef = float(model.params[col])
+            pval = float(model.pvalues[col])
+            ci = model.conf_int().loc[col]
+            gap_pct = float(coef / avg_ref * 100) if avg_ref > 0 else None
+            groups_result[group] = {
+                "unexplained_gap_vs_highest_paid_pct": round(gap_pct, 2) if gap_pct is not None else None,
+                "is_significant": bool(pval < 0.05),
+                "p_value": round(pval, 3),
+                "confidence_interval": [round(float(ci.iloc[0]), 2), round(float(ci.iloc[1]), 2)],
+                "sample_size_warning": n < 50,
+                "interpretation": _ethnicity_interpretation(group, gap_pct, pval, n, reference_group),
+            }
+
+        return {
+            "reference_group": reference_group,
+            "variables_controlled": controlled,
+            "sample_size_warning": n < 50,
+            "groups": groups_result,
+        }
+    except Exception as exc:
+        return {"error": f"Regression failed: {exc}"}
 
 
 @app.post("/analyze")
@@ -274,5 +487,15 @@ async def analyze(file: UploadFile = File(...)):
         response["tenure_analysis"] = tenure_analysis
     if performance_analysis is not None:
         response["performance_analysis"] = performance_analysis
+
+    # ── Regression analysis ───────────────────────────────────────────────────
+    regression_analysis: dict = {
+        "gender_regression": run_gender_regression(df, has_years_at_company, has_performance_rating),
+    }
+    if has_race_ethnicity:
+        regression_analysis["ethnicity_regression"] = run_ethnicity_regression(
+            df, has_years_at_company, has_performance_rating
+        )
+    response["regression_analysis"] = regression_analysis
 
     return response

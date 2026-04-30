@@ -3,3 +3,4 @@ uvicorn[standard]==0.34.0
 pandas==2.2.3
 numpy==2.2.4
 python-multipart==0.0.20
+statsmodels==0.14.4
