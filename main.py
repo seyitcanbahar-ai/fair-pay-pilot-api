@@ -591,6 +591,10 @@ async def analyze(file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not read CSV: {exc}")
 
+    # Strip BOM and invisible whitespace from column names before anything else
+    df.columns = df.columns.str.strip()
+    df.columns = df.columns.str.replace('﻿', '', regex=False)
+
     # Trim whitespace from all string columns and drop completely empty rows
     for col in df.select_dtypes(include="object").columns:
         df[col] = df[col].str.strip()
@@ -636,19 +640,8 @@ async def analyze(file: UploadFile = File(...)):
     has_compa_ratio = has_pay_band_min and has_pay_band_max and has_pay_band_mid
 
     # ── Step 2: parse and clean the salary column (always "Salary" after mapping) ─
-    # Diagnostic: if the column is full of non-numeric values it was mapped wrongly
-    salary_probe = df["Salary"].dropna().head(20)
-    if not salary_probe.empty:
-        probe_cleaned = salary_probe.apply(clean_salary)
-        if pd.to_numeric(probe_cleaned, errors="coerce").notna().sum() == 0:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Salary column appears to contain non-numeric data. "
-                    f"Detected column: '{original_salary_col}'. "
-                    "Please check your column mapping."
-                ),
-            )
+    raw_salary_sample = [str(v) for v in df["Salary"].dropna().head(5).tolist()]
+    logger.debug("Raw salary sample before cleaning: %s", raw_salary_sample)
 
     original_salaries = df["Salary"].copy()
     df["Salary"] = df["Salary"].apply(clean_salary)
@@ -663,6 +656,7 @@ async def analyze(file: UploadFile = File(...)):
         detail = "No valid salary rows found in the CSV." if df.empty else "Fewer than 3 valid salary rows found in the CSV."
         if failed_examples:
             detail += f" Example values that failed to parse: {', '.join(failed_examples)}."
+        detail += f" Raw salary sample (before cleaning): {raw_salary_sample}."
         raise HTTPException(status_code=400, detail=detail)
 
     # ── available_analyses ────────────────────────────────────────────────────
