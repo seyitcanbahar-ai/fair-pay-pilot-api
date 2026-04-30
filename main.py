@@ -1,10 +1,14 @@
 import io
+import logging
+import re
 from datetime import date
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Fair Pay Pilot API")
 
@@ -19,10 +23,10 @@ app.add_middleware(
 MANDATORY_FIELDS = ["Salary", "Gender", "Job Level", "Department"]
 
 COLUMN_VARIANTS = {
-    "Salary": ["salary", "pay", "compensation", "annual salary", "base salary", "base pay"],
+    "Salary": ["salary", "pay", "annual salary", "compensation", "base salary", "base pay"],
     "Gender": ["gender", "sex"],
-    "Job Level": ["job level", "level", "grade", "band", "seniority"],
-    "Department": ["department", "dept", "team", "division"],
+    "Job Level": ["job level", "level", "grade", "band", "seniority", "tier"],
+    "Department": ["department", "dept", "team", "division", "business unit"],
     "Race/Ethnicity": ["race/ethnicity", "ethnicity", "race", "diversity"],
     "Years at Company": ["years at company", "tenure", "years"],
     "Performance Rating": ["performance rating", "performance", "rating", "review"],
@@ -35,6 +39,15 @@ COLUMN_VARIANTS = {
     "Pay Band Max": ["pay band max", "band max", "salary band max", "range max"],
     "Pay Band Mid": ["pay band mid", "band mid", "midpoint", "salary midpoint"],
 }
+
+
+def _preprocess_csv_text(text: str) -> str:
+    """Remove thousands-separator commas (e.g. £82,000 → £82000) before pandas sees the text.
+
+    Without this, an unquoted value like £82,000 looks like two fields to the CSV
+    parser and raises "Expected N fields, saw N+1".
+    """
+    return re.sub(r"(?<=\d),(?=\d)", "", text)
 
 
 def resolve_columns(df_columns: list) -> dict:
@@ -50,8 +63,22 @@ def resolve_columns(df_columns: list) -> dict:
 
 def clean_salary(value):
     if pd.isna(value):
-        return value
-    return str(value).replace("£", "").replace("$", "").replace("€", "").replace(",", "").strip()
+        return np.nan
+    cleaned = (
+        str(value)
+        .replace("£", "")
+        .replace("$", "")
+        .replace("€", "")
+    )
+    cleaned = re.sub(r"(?<=\d),(?=\d)", "", cleaned)  # remove thousands separators
+    cleaned = cleaned.replace(" ", "").strip()
+    if not cleaned:
+        return np.nan
+    try:
+        return float(cleaned)
+    except ValueError:
+        logger.warning("Could not parse numeric value %r — row will be skipped", value)
+        return np.nan
 
 
 def gap_table(avg_by_group: pd.Series) -> dict:
@@ -554,7 +581,8 @@ async def analyze(file: UploadFile = File(...)):
 
     raw = await file.read()
     try:
-        df = pd.read_csv(io.StringIO(raw.decode("utf-8")))
+        csv_text = _preprocess_csv_text(raw.decode("utf-8"))
+        df = pd.read_csv(io.StringIO(csv_text))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not read CSV: {exc}")
 
