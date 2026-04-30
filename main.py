@@ -615,8 +615,12 @@ async def analyze(file: UploadFile = File(...)):
             },
         )
 
-    # Rename columns to canonical names
+    # ── Step 1: rename all columns to canonical names BEFORE any data parsing ────
     df = df.rename(columns={v: k for k, v in col_map.items()})
+
+    # Record the original CSV column name that was mapped to Salary for diagnostics
+    original_salary_col = col_map.get("Salary", "Salary")
+    logger.info("Salary column mapped from original CSV column %r", original_salary_col)
 
     has_employee_id = "Employee ID" in df.columns
     has_job_title = "Job Title" in df.columns
@@ -631,7 +635,21 @@ async def analyze(file: UploadFile = File(...)):
     has_pay_band_mid = "Pay Band Mid" in df.columns
     has_compa_ratio = has_pay_band_min and has_pay_band_max and has_pay_band_mid
 
-    # Clean and validate salary
+    # ── Step 2: parse and clean the salary column (always "Salary" after mapping) ─
+    # Diagnostic: if the column is full of non-numeric values it was mapped wrongly
+    salary_probe = df["Salary"].dropna().head(20)
+    if not salary_probe.empty:
+        probe_cleaned = salary_probe.apply(clean_salary)
+        if pd.to_numeric(probe_cleaned, errors="coerce").notna().sum() == 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Salary column appears to contain non-numeric data. "
+                    f"Detected column: '{original_salary_col}'. "
+                    "Please check your column mapping."
+                ),
+            )
+
     original_salaries = df["Salary"].copy()
     df["Salary"] = df["Salary"].apply(clean_salary)
     df["Salary"] = pd.to_numeric(df["Salary"], errors="coerce")
