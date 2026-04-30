@@ -558,10 +558,14 @@ async def analyze(file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not read CSV: {exc}")
 
+    cols_after_read = df.columns.tolist()
+
     # ── STEP 1: normalise all column names to lowercase, stripping BOM and spaces ─
     df.columns = df.columns.str.strip()
     df.columns = df.columns.str.replace('\ufeff', '', regex=False)
     df.columns = df.columns.str.lower()
+
+    cols_after_lower = df.columns.tolist()
 
     # Strip string cell values and drop completely empty rows
     for col in df.select_dtypes(include="object").columns:
@@ -628,6 +632,9 @@ async def analyze(file: UploadFile = File(...)):
                 "message": "CSV is missing required columns.",
                 "missing_fields": missing_mandatory,
                 "detected_columns": sorted(df.columns.tolist()),
+                "debug_cols_after_read": cols_after_read,
+                "debug_cols_after_lower": cols_after_lower,
+                "debug_column_map": column_map,
                 "hint": {
                     "Salary": "accepted names: " + ", ".join(salary_variations),
                     "Gender": "accepted names: " + ", ".join(gender_variations),
@@ -664,11 +671,18 @@ async def analyze(file: UploadFile = File(...)):
     df = df.dropna(subset=["Salary"]).copy()
 
     if len(df) < 3:
-        detail = "No valid salary rows found in the CSV." if df.empty else "Fewer than 3 valid salary rows found."
-        if failed_examples:
-            detail += f" Values that failed to parse: {', '.join(failed_examples)}."
-        detail += f" Raw salary values before cleaning: {raw_salary_sample}. dtype: {salary_col_dtype}."
-        raise HTTPException(status_code=400, detail=detail)
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "No valid salary rows found in the CSV." if df.empty else "Fewer than 3 valid salary rows found.",
+                "values_that_failed": failed_examples,
+                "raw_salary_sample": raw_salary_sample,
+                "salary_col_dtype": salary_col_dtype,
+                "debug_cols_after_read": cols_after_read,
+                "debug_cols_after_lower": cols_after_lower,
+                "debug_column_map": column_map,
+            },
+        )
 
     # ── STEP 6: run all analyses ──────────────────────────────────────────────────
     skipped_reasons: dict = {}
