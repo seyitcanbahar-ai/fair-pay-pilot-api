@@ -651,17 +651,8 @@ async def analyze(file: UploadFile = File(...)):
     has_compa_ratio      = has_pay_band_min and has_pay_band_max and has_pay_band_mid
 
     # ── STEP 5: clean the Salary column ──────────────────────────────────────────
-    salary_probe = df["Salary"].dropna().head(20)
-    if not salary_probe.empty:
-        if pd.to_numeric(salary_probe.apply(clean_salary), errors="coerce").notna().sum() == 0:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Salary column appears to contain non-numeric data. "
-                    f"Detected column: '{original_salary_col}'. "
-                    "Please check your column mapping."
-                ),
-            )
+    salary_col_dtype = str(df["Salary"].dtype)
+    raw_salary_sample = [str(v) for v in df["Salary"].head(10).tolist()]
 
     original_salaries = df["Salary"].copy()
     df["Salary"] = df["Salary"].apply(clean_salary)
@@ -676,6 +667,7 @@ async def analyze(file: UploadFile = File(...)):
         detail = "No valid salary rows found in the CSV." if df.empty else "Fewer than 3 valid salary rows found."
         if failed_examples:
             detail += f" Values that failed to parse: {', '.join(failed_examples)}."
+        detail += f" Raw salary values before cleaning: {raw_salary_sample}. dtype: {salary_col_dtype}."
         raise HTTPException(status_code=400, detail=detail)
 
     # ── STEP 6: run all analyses ──────────────────────────────────────────────────
