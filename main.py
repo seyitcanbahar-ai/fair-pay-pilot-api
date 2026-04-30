@@ -1,4 +1,4 @@
-import io
+﻿import io
 import logging
 import re
 from datetime import date
@@ -560,7 +560,7 @@ async def analyze(file: UploadFile = File(...)):
 
     # ── STEP 1: normalise all column names to lowercase, stripping BOM and spaces ─
     df.columns = df.columns.str.strip()
-    df.columns = df.columns.str.replace("﻿", "", regex=False)
+    df.columns = df.columns.str.replace('\ufeff', '', regex=False)
     df.columns = df.columns.str.lower()
 
     # Strip string cell values and drop completely empty rows
@@ -577,7 +577,7 @@ async def analyze(file: UploadFile = File(...)):
     tenure_variations        = ["years at company", "tenure", "years", "length of service", "service years"]
     performance_variations   = ["performance rating", "performance", "rating", "review", "score", "annual rating"]
     bonus_variations         = ["bonus", "bonus amount", "annual bonus", "variable pay", "incentive"]
-    employee_id_variations   = ["employee id", "emp id", "id", "staff id", "employeeid", "employee_id"]
+    employee_id_variations   = ["employee id", "emp id", "staff id", "employeeid", "employee_id", "emp_id"]
     job_title_variations     = ["job title", "title", "position", "role"]
     hire_date_variations     = ["hire date", "start date", "date joined", "join date", "start year"]
     total_comp_variations    = ["total compensation", "total comp", "total pay", "total reward"]
