@@ -559,6 +559,8 @@ async def analyze(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=f"Could not read CSV: {exc}")
 
     cols_after_read = df.columns.tolist()
+    debug_rows_after_read = len(df)
+    debug_rows_after_dropna = 0
     debug_first_data_row = df.iloc[0].tolist() if not df.empty else []
 
     # ── STEP 1: normalise all column names to lowercase, stripping BOM and spaces ─
@@ -568,10 +570,11 @@ async def analyze(file: UploadFile = File(...)):
 
     cols_after_lower = df.columns.tolist()
 
-    # Strip string cell values and drop completely empty rows
+    # Strip only non-salary object columns — stripping salary strings can corrupt them
+    _salary_col_candidates = {"salary", "pay", "annual salary", "compensation", "base salary", "base pay"}
     for col in df.select_dtypes(include="object").columns:
-        df[col] = df[col].str.strip()
-    df = df.dropna(how="all").copy()
+        if col not in _salary_col_candidates:
+            df[col] = df[col].str.strip()
 
     # ── STEP 2: detect which actual column maps to each standard name ─────────────
     salary_variations        = ["salary", "pay", "annual salary", "compensation", "base salary", "base pay"]
@@ -627,6 +630,8 @@ async def analyze(file: UploadFile = File(...)):
                 "message": "Rename failed",
                 "columns_after_rename": list(df.columns),
                 "rename_dict": rename_dict,
+                "debug_rows_after_read": debug_rows_after_read,
+                "debug_rows_after_dropna": debug_rows_after_dropna,
             },
         )
 
@@ -646,6 +651,8 @@ async def analyze(file: UploadFile = File(...)):
                 "debug_cols_after_lower": cols_after_lower,
                 "debug_column_map": column_map,
                 "debug_first_data_row": debug_first_data_row,
+                "debug_rows_after_read": debug_rows_after_read,
+                "debug_rows_after_dropna": debug_rows_after_dropna,
                 "hint": {
                     "Salary": "accepted names: " + ", ".join(salary_variations),
                     "Gender": "accepted names: " + ", ".join(gender_variations),
@@ -676,7 +683,10 @@ async def analyze(file: UploadFile = File(...)):
     df["Salary"] = df["Salary"].apply(clean_salary)
     df["Salary"] = pd.to_numeric(df["Salary"], errors="coerce")
 
-    failed_mask = df["Salary"].isna() & original_salaries.notna()
+    df = df.dropna(how="all").copy()
+    debug_rows_after_dropna = len(df)
+
+    failed_mask = df["Salary"].isna() & original_salaries.reindex(df.index).notna()
     failed_examples = [str(v) for v in original_salaries[failed_mask].head(5).tolist()]
 
     df = df.dropna(subset=["Salary"]).copy()
@@ -693,6 +703,8 @@ async def analyze(file: UploadFile = File(...)):
                 "debug_cols_after_lower": cols_after_lower,
                 "debug_column_map": column_map,
                 "debug_first_data_row": df.iloc[0].tolist() if not df.empty else [],
+                "debug_rows_after_read": debug_rows_after_read,
+                "debug_rows_after_dropna": debug_rows_after_dropna,
             },
         )
 
