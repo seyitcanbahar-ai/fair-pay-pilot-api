@@ -571,13 +571,13 @@ async def analyze(file: UploadFile = File(...)):
             df[col] = df[col].str.strip()
 
     # ── STEP 2: detect which actual column maps to each standard name ─────────────
-    salary_variations        = ["salary", "pay", "annual salary", "compensation", "base salary", "base pay"]
+    salary_variations        = ["salary", "annual salary", "pay", "compensation", "base salary", "base pay"]
     gender_variations        = ["gender", "sex"]
     job_level_variations     = ["job level", "level", "grade", "band", "seniority", "tier"]
-    department_variations    = ["department", "dept", "team", "division", "business unit"]
+    department_variations    = ["department", "dept", "division", "business unit", "team"]
     ethnicity_variations     = ["race/ethnicity", "ethnicity", "race", "diversity", "race ethnicity"]
-    tenure_variations        = ["years at company", "tenure", "years", "length of service", "service years"]
-    performance_variations   = ["performance rating", "performance", "rating", "review", "score", "annual rating"]
+    tenure_variations        = ["years at company", "tenure", "length of service", "service years", "years"]
+    performance_variations   = ["performance rating", "performance", "annual rating", "review", "score", "rating"]
     bonus_variations         = ["bonus", "bonus amount", "annual bonus", "variable pay", "incentive"]
     employee_id_variations   = ["employee id", "emp id", "staff id", "employeeid", "employee_id", "emp_id"]
     job_title_variations     = ["job title", "title", "position", "role"]
