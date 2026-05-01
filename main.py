@@ -559,6 +559,7 @@ async def analyze(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=f"Could not read CSV: {exc}")
 
     cols_after_read = df.columns.tolist()
+    debug_first_data_row = df.iloc[0].tolist() if not df.empty else []
 
     # ── STEP 1: normalise all column names to lowercase, stripping BOM and spaces ─
     df.columns = df.columns.str.strip()
@@ -636,6 +637,7 @@ async def analyze(file: UploadFile = File(...)):
                 "debug_cols_after_read": cols_after_read,
                 "debug_cols_after_lower": cols_after_lower,
                 "debug_column_map": column_map,
+                "debug_first_data_row": debug_first_data_row,
                 "hint": {
                     "Salary": "accepted names: " + ", ".join(salary_variations),
                     "Gender": "accepted names: " + ", ".join(gender_variations),
@@ -682,6 +684,7 @@ async def analyze(file: UploadFile = File(...)):
                 "debug_cols_after_read": cols_after_read,
                 "debug_cols_after_lower": cols_after_lower,
                 "debug_column_map": column_map,
+                "debug_first_data_row": debug_first_data_row,
             },
         )
 
