@@ -563,9 +563,6 @@ async def analyze(file: UploadFile = File(...)):
             raise HTTPException(status_code=400, detail=f"Could not read CSV: {exc}")
 
     cols_after_read = df.columns.tolist()
-    debug_rows_after_read = len(df)
-    debug_rows_after_dropna = 0
-    debug_first_data_row = df.iloc[0].tolist() if not df.empty else []
 
     # ── STEP 1: normalise all column names to lowercase, stripping BOM and spaces ─
     df.columns = df.columns.str.strip()
@@ -627,9 +624,6 @@ async def analyze(file: UploadFile = File(...)):
     # ── STEP 3: rename all detected columns to standard names in one operation ────
     rename_dict = {actual: std for std, actual in column_map.items()}
     df = df.rename(columns=rename_dict)
-    print(f"DEBUG rename_dict: {rename_dict}")
-    print(f"DEBUG df.columns after rename: {list(df.columns)}")
-    print(f"DEBUG df['Salary'] first 3 values: {df['Salary'].head(3).tolist() if 'Salary' in df.columns else 'NOT FOUND'}")
     if "Salary" not in df.columns:
         raise HTTPException(
             status_code=400,
@@ -637,8 +631,6 @@ async def analyze(file: UploadFile = File(...)):
                 "message": "Rename failed",
                 "columns_after_rename": list(df.columns),
                 "rename_dict": rename_dict,
-                "debug_rows_after_read": debug_rows_after_read,
-                "debug_rows_after_dropna": debug_rows_after_dropna,
             },
         )
 
@@ -654,12 +646,6 @@ async def analyze(file: UploadFile = File(...)):
                 "message": "CSV is missing required columns.",
                 "missing_fields": missing_mandatory,
                 "detected_columns": sorted(df.columns.tolist()),
-                "debug_cols_after_read": cols_after_read,
-                "debug_cols_after_lower": cols_after_lower,
-                "debug_column_map": column_map,
-                "debug_first_data_row": debug_first_data_row,
-                "debug_rows_after_read": debug_rows_after_read,
-                "debug_rows_after_dropna": debug_rows_after_dropna,
                 "hint": {
                     "Salary": "accepted names: " + ", ".join(salary_variations),
                     "Gender": "accepted names: " + ", ".join(gender_variations),
@@ -691,7 +677,6 @@ async def analyze(file: UploadFile = File(...)):
     df["Salary"] = pd.to_numeric(df["Salary"], errors="coerce")
 
     df = df.dropna(how="all").copy()
-    debug_rows_after_dropna = len(df)
 
     failed_mask = df["Salary"].isna() & original_salaries.reindex(df.index).notna()
     failed_examples = [str(v) for v in original_salaries[failed_mask].head(5).tolist()]
@@ -706,12 +691,6 @@ async def analyze(file: UploadFile = File(...)):
                 "values_that_failed": failed_examples,
                 "raw_salary_sample": raw_salary_sample,
                 "salary_col_dtype": salary_col_dtype,
-                "debug_cols_after_read": cols_after_read,
-                "debug_cols_after_lower": cols_after_lower,
-                "debug_column_map": column_map,
-                "debug_first_data_row": df.iloc[0].tolist() if not df.empty else [],
-                "debug_rows_after_read": debug_rows_after_read,
-                "debug_rows_after_dropna": debug_rows_after_dropna,
             },
         )
 
