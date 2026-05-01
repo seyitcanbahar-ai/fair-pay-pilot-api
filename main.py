@@ -23,11 +23,6 @@ app.add_middleware(
 MANDATORY_FIELDS = ["Salary", "Gender", "Job Level", "Department"]
 
 
-def _preprocess_csv_text(text: str) -> str:
-    """Remove thousands-separator commas (£82,000 → £82000) before pandas parses."""
-    return re.sub(r"(?<=\d),(?=\d)", "", text)
-
-
 def clean_salary(value):
     if pd.isna(value):
         return np.nan
@@ -553,8 +548,7 @@ async def analyze(file: UploadFile = File(...)):
 
     raw = await file.read()
     try:
-        csv_text = _preprocess_csv_text(raw.decode("utf-8"))
-        df = pd.read_csv(io.StringIO(csv_text))
+        df = pd.read_csv(io.StringIO(raw.decode("utf-8")), quoting=0, on_bad_lines="skip")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not read CSV: {exc}")
 
