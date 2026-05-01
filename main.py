@@ -548,9 +548,19 @@ async def analyze(file: UploadFile = File(...)):
 
     raw = await file.read()
     try:
-        df = pd.read_csv(io.StringIO(raw.decode("utf-8")), quoting=0, on_bad_lines="skip")
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Could not read CSV: {exc}")
+        text = raw.decode("utf-8")
+        # thousands=',' keeps values like £82,000 as a single field instead of splitting on the comma
+        df = pd.read_csv(
+            io.StringIO(text),
+            quoting=0,
+            on_bad_lines="skip",
+            thousands=",",
+        )
+    except Exception:
+        try:
+            df = pd.read_csv(io.StringIO(text), on_bad_lines="skip")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Could not read CSV: {exc}")
 
     cols_after_read = df.columns.tolist()
     debug_rows_after_read = len(df)
