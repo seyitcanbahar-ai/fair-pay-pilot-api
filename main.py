@@ -623,6 +623,9 @@ async def analyze(file: UploadFile = File(...)):
     # ── STEP 3: rename all detected columns to standard names in one operation ────
     rename_dict = {actual: std for std, actual in column_map.items()}
     df = df.rename(columns=rename_dict)
+    print(f"DEBUG rename_dict: {rename_dict}")
+    print(f"DEBUG df.columns after rename: {list(df.columns)}")
+    print(f"DEBUG df['Salary'] first 3 values: {df['Salary'].head(3).tolist() if 'Salary' in df.columns else 'NOT FOUND'}")
     if "Salary" not in df.columns:
         raise HTTPException(
             status_code=400,
